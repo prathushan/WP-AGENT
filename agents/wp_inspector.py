@@ -1,72 +1,66 @@
-import httpx
 import os
 import logging
+import httpx
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-HUGGINGFACE_API_TOKEN = os.getenv("HUGGINGFACE_API_TOKEN")
-if not HUGGINGFACE_API_TOKEN:
-    raise RuntimeError("HUGGINGFACE_API_TOKEN environment variable is missing")
+# Get OpenRouter API Key
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY environment variable is missing")
 
 logger = logging.getLogger(__name__)
 
 async def handle_error(data):
-    issue_type = data.get("error_type")
     error_log = data.get("error_log", "")
+    if not error_log:
+        return {"fix": "No error log provided"}
+    return {"fix": await fetch_fix_suggestion(error_log)}
 
-    if issue_type == "fatal":
-        if not error_log:
-            return {"fix": "No error log provided for fatal error"}
-        return {"fix": await fetch_fix_suggestion(error_log)}
-    
-    elif issue_type == "404":
-        return {"fix": "Check permalink structure or page slug"}
-    
-    return {"fix": "Unhandled issue type"}
+async def fetch_fix_suggestion(error_log):
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
-async def fetch_fix_suggestion(code_snippet):
-    url = "https://api-inference.huggingface.co/models/codellama/CodeLlama-7b-Instruct-hf"
     headers = {
-        "Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://yourdomain.com",  # Optional, but recommended
+        "X-Title": "WP Site Inspector AI Agent"
     }
+
+    # Using free and reliable OpenRouter model
     payload = {
-        "inputs": f"Fix this WordPress PHP fatal error:\n{code_snippet}",
-        "parameters": {
-            "max_new_tokens": 200,
-            "return_full_text": False
-        }
+        "model": "deepseek/deepseek-chat-v3-0324:free",  # or "mistralai/mistral-7b-instruct"
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful AI assistant that fixes WordPress PHP errors."
+            },
+            {
+                "role": "user",
+                "content": f"Fix this WordPress PHP error:\n{error_log}"
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 400
     }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, headers=headers, json=payload)
-            
-            # Handle Hugging Face API errors
+
             if response.status_code != 200:
-                error_msg = f"Hugging Face API error: {response.status_code} {response.text}"
-                logger.error(error_msg)
-                return f"Model unavailable. Please try again later. (Status: {response.status_code})"
-            
+                logger.error(f"OpenRouter error: {response.status_code} {response.text}")
+                return f"Model unavailable. Try again later. (Status: {response.status_code})"
+
             result = response.json()
-            
-            # Handle model loading errors
-            if "error" in result:
-                if "loading" in result["error"].lower():
-                    return "Model is still loading. Please try again in 20 seconds."
-                return f"Model error: {result['error']}"
-            
-            # Parse successful response
-            if isinstance(result, list) and len(result) > 0:
-                return result[0].get("generated_text", "No suggestion generated")
-            
-            return "Unexpected response format from model"
-    
+            return result["choices"][0]["message"]["content"]
+
     except httpx.TimeoutException:
-        logger.error("Hugging Face API timeout")
+        logger.error("OpenRouter API timeout")
         return "Model timed out. Please try again."
+
     except Exception as e:
-        logger.exception("Hugging Face request failed")
+        logger.exception("OpenRouter request failed")
         return f"Error contacting model: {str(e)}"
+
